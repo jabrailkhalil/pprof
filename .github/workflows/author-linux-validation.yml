@@ -1,0 +1,152 @@
+name: Author pprof pinned Linux validation
+
+on:
+  push:
+    branches: [ci/pprof-linux-20261011]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: main
+            sha: 7bae8d8c4c9ebc3886a79f796fbde65b7e1316f8
+          - name: pr-1032
+            sha: 95895448dfd405a9b55bd5c6c1286ff75b846bf1
+          - name: pr-1033
+            sha: e7bdf6ce1f9d997c92a030351a9eb5239597e201
+          - name: pr-1035
+            sha: cf3909eb9f137982fc21952602e14322cf3b7c85
+    env:
+      GOFLAGS: -mod=readonly
+      GOTOOLCHAIN: local
+      BASE_SHA: 7bae8d8c4c9ebc3886a79f796fbde65b7e1316f8
+    steps:
+      - name: Checkout isolated diagnostic harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Checkout exact unchanged source tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.26'
+          cache: false
+      - name: Install tools at upstream CI versions
+        run: |
+          mkdir -p "$RUNNER_TEMP/pprof-evidence"
+          sudo apt-get update
+          sudo apt-get install -y graphviz llvm clang
+          google-chrome --version
+          mkdir -p "$RUNNER_TEMP/pprof-tools"
+          cd "$RUNNER_TEMP/pprof-tools"
+          go mod init author-validation-tools
+          go install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Record immutable tree and environment
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = '${{ matrix.sha }}'
+          git diff --exit-code
+          git fetch --no-tags https://github.com/google/pprof.git "$BASE_SHA"
+          git diff "$BASE_SHA" HEAD > "$RUNNER_TEMP/pprof-evidence/pr.patch"
+          sha256sum go.mod go.sum browsertests/go.mod browsertests/go.sum test.sh > "$RUNNER_TEMP/pprof-evidence/source-hashes.txt"
+          { date -u; uname -a; go version; go env GOOS GOARCH GOTOOLCHAIN GOFLAGS; google-chrome --version; dot -V; llvm-symbolizer --version; staticcheck -version; golangci-lint --version; } 2>&1 | tee "$RUNNER_TEMP/pprof-evidence/environment.txt"
+      - name: Execute unchanged complete upstream test script
+        id: upstream
+        continue-on-error: true
+        working-directory: source
+        run: |
+          set +e
+          bash ./test.sh 2>&1 | tee "$RUNNER_TEMP/pprof-evidence/test-script.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf 'test-script %s\n' "$rc" >> "$RUNNER_TEMP/pprof-evidence/exits.txt"
+          exit "$rc"
+      - name: Fresh JSON root and actual Chrome race tests
+        id: fresh
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        working-directory: source
+        run: |
+          result=0
+          for module in root browser; do
+            test_dir=.
+            if [ "$module" = browser ]; then test_dir=browsertests; fi
+            set +e
+            (cd "$test_dir" && go test -race -count=1 -json ./...) > "$RUNNER_TEMP/pprof-evidence/$module.jsonl" 2> "$RUNNER_TEMP/pprof-evidence/$module.stderr"
+            rc=$?
+            set -e
+            cat "$RUNNER_TEMP/pprof-evidence/$module.stderr"
+            printf '%s %s\n' "$module" "$rc" | tee -a "$RUNNER_TEMP/pprof-evidence/exits.txt"
+            if [ "$rc" -ne 0 ]; then result=1; fi
+          done
+          git diff --exit-code -- go.mod go.sum browsertests/go.mod browsertests/go.sum
+          python "$GITHUB_WORKSPACE/harness/.github/scripts/check-pprof-evidence.py" '${{ matrix.name }}' "$RUNNER_TEMP/pprof-evidence"
+          exit "$result"
+      - name: Negative controls against unchanged main production
+        id: negative
+        if: ${{ !cancelled() && matrix.name != 'main' }}
+        continue-on-error: true
+        working-directory: source
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/pprof-baseline" "$BASE_SHA"
+          case '${{ matrix.name }}' in
+            pr-1032)
+              git diff "$BASE_SHA" HEAD -- internal/graph/dotgraph_test.go internal/graph/testdata > "$RUNNER_TEMP/pprof-evidence/tests-only.patch"
+              module=internal/graph
+              pattern='^TestComposeWith(NamesThatNeedEscaping|FilenamesWithBackslashes)$'
+              ;;
+            pr-1033)
+              git diff "$BASE_SHA" HEAD -- browsertests/browser_test.go > "$RUNNER_TEMP/pprof-evidence/tests-only.patch"
+              module=browsertests
+              pattern='^TestProfileDetails$'
+              ;;
+            pr-1035)
+              git diff "$BASE_SHA" HEAD -- internal/driver/webui_test.go browsertests/browser_test.go > "$RUNNER_TEMP/pprof-evidence/tests-only.patch"
+              module=browsertests
+              pattern='^TestSamplingDetails$'
+              ;;
+          esac
+          test -s "$RUNNER_TEMP/pprof-evidence/tests-only.patch"
+          git -C "$RUNNER_TEMP/pprof-baseline" apply --check "$RUNNER_TEMP/pprof-evidence/tests-only.patch"
+          git -C "$RUNNER_TEMP/pprof-baseline" apply "$RUNNER_TEMP/pprof-evidence/tests-only.patch"
+          git -C "$RUNNER_TEMP/pprof-baseline" diff --name-only > "$RUNNER_TEMP/pprof-evidence/negative-changed-files.txt"
+          set +e
+          (cd "$RUNNER_TEMP/pprof-baseline/$module" && go test -count=1 -json -run "$pattern" ./...) > "$RUNNER_TEMP/pprof-evidence/negative.jsonl" 2> "$RUNNER_TEMP/pprof-evidence/negative.stderr"
+          rc=$?
+          set -e
+          cat "$RUNNER_TEMP/pprof-evidence/negative.stderr"
+          printf 'negative-expected-failure %s\n' "$rc" >> "$RUNNER_TEMP/pprof-evidence/exits.txt"
+          test "$rc" -eq 1
+          python "$GITHUB_WORKSPACE/harness/.github/scripts/check-pprof-evidence.py" '${{ matrix.name }}' "$RUNNER_TEMP/pprof-evidence" --negative
+      - name: Save raw evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pprof-${{ matrix.name }}-linux-evidence
+          path: ${{ runner.temp }}/pprof-evidence
+          if-no-files-found: error
+          retention-days: 14
+      - name: Enforce all validation outcomes
+        if: ${{ !cancelled() }}
+        env:
+          UPSTREAM: ${{ steps.upstream.outcome }}
+          FRESH: ${{ steps.fresh.outcome }}
+          NEGATIVE: ${{ steps.negative.outcome }}
+        run: |
+          test "$UPSTREAM" = success
+          test "$FRESH" = success
+          if [ '${{ matrix.name }}' != main ]; then test "$NEGATIVE" = success; fi
