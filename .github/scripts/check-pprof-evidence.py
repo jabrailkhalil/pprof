@@ -6,7 +6,7 @@ name = sys.argv[1]
 folder = Path(sys.argv[2])
 negative = '--negative' in sys.argv
 expected = {
-    'pr-1032': ['TestComposeWithNamesThatNeedEscaping', 'TestComposeWithFilenamesWithBackslashes'],
+    'pr-1032': ['TestComposeWithNamesThatNeedEscaping'],
     'pr-1033': ['TestProfileDetails'],
     'pr-1035': ['TestSamplingDetails', 'TestSamplingDetails/cpu', 'TestSamplingDetails/heap'],
 }
@@ -28,6 +28,10 @@ if negative:
     assert not any('build failed' in item.get('Output', '') for item in items), 'Compile failure is not a negative control'
     for test in expected[name]:
         assert any(key[1] == test and action == 'fail' for key, action in results.items()), (test, results)
+    if name == 'pr-1032':
+        assert any('Compose did not escape the backslash in the filename label:' in item.get('Output', '')
+                   for item in items), 'The Unix backslash assertion must independently reject main'
+        assert any('Compose incorrectly wrote' in item.get('Output', '') for item in items), 'Missing golden mismatch'
     changed = (folder / 'negative-changed-files.txt').read_text().splitlines()
     allowed = {'browsertests/browser_test.go', 'internal/driver/webui_test.go',
                'internal/graph/dotgraph_test.go', 'internal/graph/testdata/compose7.dot',
