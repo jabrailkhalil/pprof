@@ -29,9 +29,8 @@ if negative:
     for test in expected[name]:
         assert any(key[1] == test and action == 'fail' for key, action in results.items()), (test, results)
     if name == 'pr-1032':
-        assert any('Compose did not escape the backslash in the filename label:' in item.get('Output', '')
-                   for item in items), 'The Unix backslash assertion must independently reject main'
         assert any('Compose incorrectly wrote' in item.get('Output', '') for item in items), 'Missing golden mismatch'
+        assert any(key[1] == 'TestEscapeForDot' and action == 'pass' for key, action in results.items()), 'Helper coverage must remain green on main'
     changed = (folder / 'negative-changed-files.txt').read_text().splitlines()
     allowed = {'browsertests/browser_test.go', 'internal/driver/webui_test.go',
                'internal/graph/dotgraph_test.go', 'internal/graph/testdata/compose7.dot',

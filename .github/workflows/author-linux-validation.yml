@@ -18,7 +18,7 @@ jobs:
           - name: main
             sha: 7bae8d8c4c9ebc3886a79f796fbde65b7e1316f8
           - name: pr-1032
-            sha: cb195a710d1e9be69493270bf13ea870f2c4ad6b
+            sha: e2366c6e3b1fa110c74342a1e59f0839222dd3ef
     env:
       GOFLAGS: -mod=readonly
       GOTOOLCHAIN: local
@@ -103,7 +103,7 @@ jobs:
             pr-1032)
               git diff "$BASE_SHA" HEAD -- internal/graph/dotgraph_test.go internal/graph/testdata > "$RUNNER_TEMP/pprof-evidence/tests-only.patch"
               module=internal/graph
-              pattern='^TestComposeWithNamesThatNeedEscaping$'
+              pattern='^(TestComposeWithNamesThatNeedEscaping|TestEscapeForDot)$'
               ;;
             pr-1033)
               git diff "$BASE_SHA" HEAD -- browsertests/browser_test.go > "$RUNNER_TEMP/pprof-evidence/tests-only.patch"
